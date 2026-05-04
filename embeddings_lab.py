@@ -7,16 +7,20 @@ DistilBERT — on the BBC News corpus (5 categories).
 
 import numpy as np
 import pandas as pd
+import torch
+
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine
-
+from transformers import AutoTokenizer, AutoModel
 
 def build_tfidf(texts):
     """Build TF-IDF representations for a list of texts.
 
     Returns (tfidf_matrix, vectorizer).
     """
-    pass
+    vectorizer = TfidfVectorizer()
+    tfidf_matrix = vectorizer.fit_transform(texts)
+    return tfidf_matrix, vectorizer
 
 
 def compute_tfidf_similarity(tfidf_matrix):
@@ -24,7 +28,8 @@ def compute_tfidf_similarity(tfidf_matrix):
 
     Returns a numpy array of shape (n, n).
     """
-    pass
+    similarity_matrix = sklearn_cosine(tfidf_matrix)
+    return similarity_matrix
 
 
 def load_glove(filepath):
@@ -32,7 +37,16 @@ def load_glove(filepath):
 
     Returns a dict mapping each word to a numpy array.
     """
-    pass
+    embeddings = {}
+
+    with open(filepath, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split()
+            word = parts[0]
+            vector = np.array(parts[1:], dtype=float)
+            embeddings[word] = vector
+
+    return embeddings
 
 
 def text_to_glove(text, embeddings):
@@ -41,7 +55,17 @@ def text_to_glove(text, embeddings):
     Skip out-of-vocabulary words. If every word is OOV, return a zero
     vector of shape (50,).
     """
-    pass
+    words = text.lower().split()
+    vectors = []
+
+    for word in words:
+        if word in embeddings:
+            vectors.append(embeddings[word])
+
+    if len(vectors) == 0:
+        return np.zeros(50)
+
+    return np.mean(vectors, axis=0)
 
 
 def extract_bert_embedding(text, tokenizer, model):
@@ -49,7 +73,36 @@ def extract_bert_embedding(text, tokenizer, model):
 
     Returns a numpy array of shape (768,).
     """
-    pass
+    inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512,
+        padding=True
+    )
+
+    # Forward pass (no gradients)
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    # Last hidden states: (batch_size=1, seq_len, hidden_size=768)
+    last_hidden_state = outputs.last_hidden_state
+
+    # Attention mask: (1, seq_len)
+    attention_mask = inputs["attention_mask"]
+
+    # Expand mask to match hidden state shape
+    mask = attention_mask.unsqueeze(-1).expand(last_hidden_state.size()).float()
+
+    # Apply mask and compute mean pooling
+    masked_embeddings = last_hidden_state * mask
+    sum_embeddings = torch.sum(masked_embeddings, dim=1)
+    sum_mask = torch.clamp(mask.sum(dim=1), min=1e-9)
+
+    mean_pooled = sum_embeddings / sum_mask
+
+    # Convert to numpy (shape: (768,))
+    return mean_pooled.squeeze().cpu().numpy()
 
 
 def compare_similarities(texts, queries, tfidf_sim, glove_embeddings,
@@ -63,13 +116,52 @@ def compare_similarities(texts, queries, tfidf_sim, glove_embeddings,
                       "glove": [(text, score), ...],
                       "bert":  [(text, score), ...]}}
     """
-    pass
+    results = {}
 
+    # --- Precompute embeddings once ---
+    text_glove_vecs = np.array([
+        text_to_glove(t, glove_embeddings) for t in texts
+    ])
+
+    text_bert_vecs = np.array([
+        extract_bert_embedding(t, bert_tokenizer, bert_model) for t in texts
+    ])
+
+    for query in queries:
+        query_results = {}
+
+        # -------- TF-IDF --------
+        try:
+            q_idx = texts.index(query)
+            tfidf_scores = tfidf_sim[q_idx]
+        except ValueError:
+            tfidf_scores = np.zeros(len(texts))
+
+        query_results["tfidf"] = _top_k(texts, tfidf_scores, query)
+
+        # -------- GloVe --------
+        query_glove = text_to_glove(query, glove_embeddings).reshape(1, -1)
+        glove_scores = sklearn_cosine(query_glove, text_glove_vecs)[0]
+
+        query_results["glove"] = _top_k(texts, glove_scores, query)
+
+        # -------- BERT --------
+        query_bert = extract_bert_embedding(query, bert_tokenizer, bert_model).reshape(1, -1)
+        bert_scores = sklearn_cosine(query_bert, text_bert_vecs)[0]
+
+        query_results["bert"] = _top_k(texts, bert_scores, query)
+
+        results[query] = query_results
+
+    return results
+
+
+def _top_k(texts, scores, query, k=3):
+    """Helper to get top-k (text, score) excluding the query."""
+    pairs = [(t, s) for t, s in zip(texts, scores) if t != query]
+    return sorted(pairs, key=lambda x: x[1], reverse=True)[:k]
 
 if __name__ == "__main__":
-    import torch
-    from transformers import AutoTokenizer, AutoModel
-
     # Load data
     df = pd.read_csv("data/bbc_news.csv")
     texts = df["text"].tolist()
