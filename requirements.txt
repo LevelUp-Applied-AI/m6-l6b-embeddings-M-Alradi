@@ -1,6 +1,6 @@
-torch>=2.2,<3.0
-transformers<4.50
+torch
+transformers
 scikit-learn
 pandas
-numpy<2
+numpy
 pytest
